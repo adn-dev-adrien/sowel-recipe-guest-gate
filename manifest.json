@@ -1,0 +1,18 @@
+{
+  "id": "guest-gate",
+  "type": "recipe",
+  "name": "Guest Gate Access",
+  "version": "0.1.0",
+  "description": "Opens the gate when a guest of the gîte or the lodge asks for it from their phone — armable from the Dashboard, and always the one that decides.",
+  "icon": "DoorOpen",
+  "repo": "adn-dev-adrien/sowel-recipe-guest-gate",
+  "author": "adn-dev-adrien",
+  "tags": ["access", "guests", "gate"],
+  "i18n": {
+    "fr": {
+      "name": "Accès invités au portail",
+      "description": "Ouvre le portail quand un client du gîte ou de la lodge le demande depuis son téléphone — armable depuis le Dashboard, et toujours elle qui décide."
+    }
+  },
+  "sowelVersion": ">=1.64.0"
+}
