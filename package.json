@@ -1,6 +1,6 @@
 {
   "name": "sowel-recipe-guest-gate",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Opens the gate when a guest of the gîte or the lodge asks for it from their phone",
   "type": "module",
   "main": "dist/index.js",

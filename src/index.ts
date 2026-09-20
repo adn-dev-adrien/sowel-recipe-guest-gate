@@ -1,46 +1,39 @@
 // ============================================================
 // Guest Gate Access — external Sowel recipe
 //
-// A client of the gîte or the lodge presses a button on their phone, and this
-// portal opens. Everything about who they are, when their stay runs and whether
-// their code is still good happens in guestFlow, on the other side of the house;
-// what arrives here is a bare request, and this recipe is what turns it into an
-// impulse.
+// A guest of the gîte or the lodge presses a button on their phone, and this gate opens. Who they
+// are, when their stay runs and whether their code is still good is decided by
+// `sowel-plugin-guest-access`, in this house; what arrives here is a bare request, and this recipe
+// is what turns it into an impulse.
 //
-// It exists rather than a direct API call for two reasons that are worth more
-// than the code it holds:
+// It exists rather than the plugin pulsing the gate itself for two reasons worth more than the code
+// it holds:
 //
-//   1. **guestFlow must not be able to command the house.** A Sowel API token
-//      inherits its creator's role, and a `standard` role actuates EVERY
-//      equipment there is — there is no per-equipment scope. So the booking app,
-//      the machine exposed on the internet, holds no token at all: the
-//      `guest-access` plugin goes and fetches the requests, and this recipe
-//      decides. A recipe cannot restrict a token — it runs after — but it can be
-//      the only thing holding the trigger.
-//
-//   2. **You keep a switch.** The Dashboard tile arms and disarms guest access
-//      in one click, without opening guestFlow, without waiting for a deploy.
-//      A disarmed access does not fail silently: the guest's phone says the
-//      command was refused from the house.
+//   1. **Nothing that decides also actuates.** The plugin serves an anonymous page on the internet
+//      (Sowel core spec 180) and holds the accesses; it publishes a counter and nothing else. The
+//      equipment that opens is chosen here, by an admin, in a recipe instance — so a flaw in the
+//      guest-facing half cannot become a gate command on its own.
+//   2. **You keep a switch.** The Dashboard tile arms and disarms guest access in one click, without
+//      opening the accesses page and without waiting for anything. A disarmed access does not fail
+//      silently: the guest's phone says the command was refused from the house.
 //
 // What it deliberately does NOT do:
 //
-//   • it does not look at whether the gate is open before pulsing. That guard
-//     existed in the first draft, to stop a second guest closing the gate on the
-//     first one's car — and it took away something guests legitimately do, which
-//     is to close the gate behind them. Adrien's call, 2026-09-10: the command
-//     always goes out, exactly like the remote this replaces, with the same
+//   • it does not look at whether the gate is open before pulsing. That guard existed in the first
+//     draft, to stop a second guest closing the gate on the first one's car — and it took away
+//     something guests legitimately do, which is to close the gate behind them. Adrien's call,
+//     2026-09-10: the command always goes out, exactly like the remote this replaces, with the same
 //     property that a second press during the travel reverses it.
-//   • it does not deduplicate. guestFlow already absorbs the double-tap (a 2 s
-//     window) and it is the only place that can tell one tap from two intents.
+//   • it does not deduplicate. The plugin already absorbs the double press (a 2 s window) and it is
+//     the only place that can tell one slipped thumb from two intentions.
 //   • it does not hold a deadline of its own. Nothing here re-closes the gate;
-//     `portal-night-closure` is what does that, and two automations each holding
-//     their own deadline on an impulse gate send two impulses for one opening.
+//     `portal-night-closure` is what does that, and two automations each holding their own deadline
+//     on an impulse gate send two impulses for one opening.
 //
-// The gate contact travels the other way, and that is not decoration: guestFlow
-// cannot see it, and it uses it to label the guest's button — « Fermer le
-// portail » when the gate stands open. A plugin cannot read another
-// integration's device, so this recipe reads it and pushes it down.
+// The gate contact travels the other way, and that is not decoration: a plugin cannot read another
+// integration's device, so this recipe reads it and pushes it down. The GUEST never sees it — a
+// button reading « Fermer le portail » is a state display wearing a verb, and the guests' page is
+// pollable by anyone holding a code. The owner sees it, on the « Accès invités » page.
 // ============================================================
 
 // ------------------------------------------------------------
@@ -196,7 +189,7 @@ const FR = {
     requestSource: {
       name: "Demandes des invités",
       description:
-        "L'équipement lié au device « Accès invités » du plugin guest-access. C'est lui qui compte les demandes arrivées de guestFlow.",
+        "L'équipement lié au device « Accès invités » du plugin guest-access. C'est lui qui compte les demandes des clients.",
     },
     requestAlias: {
       name: "Alias du compteur",
@@ -227,7 +220,7 @@ function buildSlots(): RecipeSlotDef[] {
       id: "requestSource",
       name: "Guest requests",
       description:
-        "The equipment bound to the guest-access plugin's device — the one counting the requests that arrive from GuestFlow.",
+        "The equipment bound to the guest-access plugin's device — the one counting the guests' requests.",
       type: "equipment",
       required: true,
       // No type constraint on purpose: the device carries a counter and two enum
@@ -388,17 +381,17 @@ export function createRecipe(): RecipeDefinition {
           timeZone: "Europe/Paris",
         }).format(new Date());
 
-      /** Tells the plugin what the contact says, so GuestFlow can label the button. */
+      /** Tells the plugin what the contact says, for the owner's page. */
       const pushGateState = async (state: GateState): Promise<void> => {
         if (state === lastGateState) return;
         lastGateState = state;
         try {
           await ctx.dispatchOrder(sourceId, GATE_STATE_ALIAS, state);
         } catch (err: unknown) {
-          // Never fatal: a guest with a button labelled « Ouvrir » on an open gate
-          // is a cosmetic problem, and the pulse still works.
+          // Never fatal: an owner's page showing a stale contact is a cosmetic
+          // problem, and the pulse still works.
           const msg = err instanceof Error ? err.message : String(err);
-          ctx.log(`état du portail non transmis à guestFlow — ${msg}`, "warn");
+          ctx.log(`état du portail non transmis au plugin — ${msg}`, "warn");
         }
       };
 
@@ -407,7 +400,7 @@ export function createRecipe(): RecipeDefinition {
           await ctx.dispatchOrder(sourceId, RESULT_ALIAS, outcome);
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err);
-          ctx.log(`issue « ${outcome} » non transmise à guestFlow — ${msg}`, "error");
+          ctx.log(`issue « ${outcome} » non transmise au plugin — ${msg}`, "error");
           return;
         }
         if (detail) ctx.log(detail);
@@ -469,8 +462,8 @@ export function createRecipe(): RecipeDefinition {
       });
 
       // Starting points: the counter as it stands (so nothing fires on a restart),
-      // and the contact as it stands (so GuestFlow labels the button correctly
-      // from the first guest, not only after the gate next moves).
+      // and the contact as it stands (so the owner's page is right from the
+      // first look, not only after the gate next moves).
       const sourceDetails = ctx.equipmentManager.getByIdWithDetails(sourceId);
       const initial = (sourceDetails?.dataBindings ?? []).find((b) => b.alias === requestAlias);
       if (initial && typeof initial.value === "number" && Number.isFinite(initial.value)) {

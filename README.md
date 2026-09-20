@@ -2,22 +2,19 @@
 
 Ouvre le portail quand un client du gîte ou de la lodge le demande depuis son téléphone. Les
 demandes arrivent par le plugin
-[`sowel-plugin-guest-access`](https://github.com/adn-dev-adrien/sowel-plugin-guest-access), qui va
-les chercher chez **guestFlow** ; cette recette est ce qui décide et actionne.
+[`sowel-plugin-guest-access`](https://github.com/adn-dev-adrien/sowel-plugin-guest-access), qui tient
+les accès, les codes et la page des clients ; cette recette est ce qui décide et actionne.
 
-## Pourquoi une recette, et pas un appel d'API
+## Pourquoi une recette, et pas le plugin lui-même
 
-Un jeton d'API Sowel hérite du rôle de son créateur, et un rôle `standard` actionne **tous** les
-équipements de la maison — il n'existe aucune portée par équipement. guestFlow, la machine exposée
-sur Internet, ne détient donc aucun jeton : le plugin va chercher les demandes, et cette recette
-tient la gâchette.
+Parce que **rien de ce qui décide ne doit aussi actionner**. Le plugin sert une page anonyme sur
+Internet et détient les accès ; tout ce qu'il fait ici, c'est publier un compteur. L'équipement qui
+s'ouvre, lui, est choisi par un administrateur, dans une instance de recette — si bien qu'une faille
+du côté client ne peut pas se transformer toute seule en commande de portail.
 
-Une recette **ne peut pas** restreindre un jeton — elle s'exécute après. Mais elle peut être la
-seule chose qui déclenche.
-
-Et elle vous laisse un interrupteur : la tuile du Dashboard arme ou coupe l'accès invités en un
-clic, sans ouvrir guestFlow. Un accès coupé n'échoue pas en silence — le téléphone du client
-affiche que la commande a été refusée depuis la maison.
+Et elle vous laisse un interrupteur : la tuile du Dashboard arme ou coupe l'accès invités en un clic,
+sans ouvrir la page des accès et sans attendre quoi que ce soit. Un accès coupé n'échoue pas en
+silence — le téléphone du client affiche que la commande a été refusée depuis la maison.
 
 ## Ce qu'elle ne fait pas, volontairement
 
@@ -26,7 +23,7 @@ affiche que la commande a été refusée depuis la maison.
   Elle retirait quelque chose de légitime : refermer derrière soi. Décision d'Adrien du 2026-09-10 —
   la commande part toujours, comme la télécommande qu'elle remplace, avec la même propriété qu'un
   appui pendant la course inverse le mouvement.
-- **Elle ne déduplique pas.** guestFlow absorbe déjà le double-appui (fenêtre de 2 s), et c'est le
+- **Elle ne déduplique pas.** Le plugin absorbe déjà le double appui (fenêtre de 2 s), et c'est le
   seul endroit qui peut distinguer un doigt qui ripe de deux intentions.
 - **Elle ne tient aucune échéance.** Rien ici ne referme le portail :
   [`portal-night-closure`](https://github.com/adn-dev-adrien/sowel-recipe-portal-night-closure) s'en
@@ -35,9 +32,12 @@ affiche que la commande a été refusée depuis la maison.
 
 ## Le contact du portail repart dans l'autre sens
 
-guestFlow ne voit pas le contact, et il en a besoin pour intituler le bouton du client
-(« Fermer le portail » quand le portail est ouvert). Un plugin ne peut pas lire le device d'une
-autre intégration — c'est donc la recette qui lit l'état et le pousse au plugin, par un ordre.
+Un plugin ne peut pas lire le device d'une autre intégration : c'est donc la recette qui lit l'état
+du portail et le pousse au plugin, par un ordre. **Le client, lui, ne le voit jamais** — un bouton
+qui dit « Fermer le portail » est un afficheur d'état déguisé en verbe, et la page des clients est
+interrogeable par qui détient un code. C'est le propriétaire qui le voit, sur la page « Accès
+invités » de Sowel.
+
 L'état est lu **par catégorie** (`gate_state`, sinon `contact_door`), ce qui évite un champ d'alias
 à remplir et survit à une installation nommée autrement.
 
@@ -67,6 +67,8 @@ elle le signale à la création plutôt qu'à l'usage.
 
 Source personnelle (spec 136) : **Plugins → Store → Sources personnelles** →
 `adn-dev-adrien/sowel-recipe-guest-gate` → Installer → confirmer l'empreinte.
+
+Elle se lie à l'équipement du plugin `guest-access` (device « Accès invités ») et au portail.
 
 ## Licence
 
