@@ -1,46 +1,62 @@
 import { describe, expect, it } from "vitest";
-import { createRecipe, readGateState, isNewRequest } from "./index.js";
+import { createRecipe, readGateState, isNewRequest, buildCatalog } from "./index.js";
 
-// What these tests are really guarding: a recipe that holds the trigger of a gate
-// must never fire it by accident — not on a restart, not on a repeated reading —
-// and must always tell the guest what happened, including when it refuses.
+// What these tests are really guarding: a recipe that holds the trigger of the
+// house's gates must never fire one by accident — not on a restart, not on a
+// repeated reading, never on something that is not a gate — and must always tell
+// the guest what happened, including when it refuses.
 
-type Handler = (event: { equipmentId: string; alias: string; value: unknown }) => void;
+type Handler = (event: Record<string, unknown>) => void;
 
 const SOURCE = "eq-guest-access";
 const GATE = "eq-gate";
+const GARAGE = "eq-garage";
+const LAMP = "eq-lamp";
+
+interface Eq {
+  id: string;
+  name: string;
+  type: string;
+  dataBindings: Array<{ alias: string; category?: string; value?: unknown }>;
+  orderBindings: Array<{ alias: string; enumValues?: string[] }>;
+}
 
 function makeCtx(over: Record<string, unknown> = {}) {
   const logs: Array<{ message: string; level: string }> = [];
-  const state = new Map<string, unknown>(
-    (over.state as Array<[string, unknown]> | undefined) ?? [],
-  );
+  const state = new Map<string, unknown>((over.state as Array<[string, unknown]> | undefined) ?? []);
   const orders: Array<{ equipmentId: string; alias: string; value: unknown }> = [];
-  const handlers: Handler[] = [];
-  const handlerTypes: string[] = [];
+  const handlers: Array<{ type: string; handler: Handler }> = [];
   const unsubs: number[] = [];
 
-  const sourceDetails = {
+  const source: Eq = {
     id: SOURCE,
-    name: "Accès invités",
-    dataBindings: [{ alias: "requests", category: "generic", value: (over.initialCount as number) ?? 4 }],
+    name: "Accès partagés",
+    type: "switch",
+    dataBindings: [
+      { alias: "requests", category: "generic", value: (over.initialCount as number) ?? 4 },
+      { alias: "last_request_gate", category: "generic", value: (over.target as string) ?? GATE },
+    ],
     orderBindings: [
       { alias: "result", enumValues: ["opened", "already_open", "refused", "error"] },
-      { alias: "gate_state", enumValues: ["open", "closed", "unknown"] },
-      // An equipment bound before the plugin declared this order does not have
-      // it — `labelBound: false` is that installation.
-      ...(over.labelBound === false ? [] : [{ alias: "opening_label" }]),
+      { alias: "gate_catalog" },
     ],
   };
-  const gateDetails = {
+  const gate: Eq = {
     id: GATE,
-    name: "Portail",
+    name: "Portail d'entrée",
     type: "gate",
-    dataBindings: [
-      { alias: "state", category: "gate_state", value: (over.gateState as string) ?? "closed" },
-    ],
+    dataBindings: [{ alias: "state", category: "gate_state", value: (over.gateState as string) ?? "closed" }],
     orderBindings: [{ alias: "command", enumValues: ["pulse"] }],
   };
+  const garage: Eq = {
+    id: GARAGE,
+    name: "Garage",
+    type: "gate",
+    dataBindings: [{ alias: "closed", category: "contact_door", value: false }],
+    orderBindings: [{ alias: "command" }],
+  };
+  const lamp: Eq = { id: LAMP, name: "Lampe", type: "light_onoff", dataBindings: [], orderBindings: [{ alias: "command" }] };
+  const all: Eq[] = [source, gate, garage, lamp];
 
   const ctx = {
     log: (message: string, level = "info") => logs.push({ message, level }),
@@ -50,23 +66,20 @@ function makeCtx(over: Record<string, unknown> = {}) {
     },
     eventBus: {
       onType: (type: string, handler: Handler) => {
-        handlers.push(handler);
-        handlerTypes.push(type);
+        handlers.push({ type, handler });
         const index = handlers.length - 1;
         return () => unsubs.push(index);
       },
     },
     equipmentManager: {
-      // Reads the SAME mutable objects as getByIdWithDetails: a fake where the two
-      // disagree lets a test mutate the type and prove nothing.
-      getById: (id: string) =>
-        id === GATE
-          ? { id: GATE, name: gateDetails.name, type: gateDetails.type }
-          : id === SOURCE
-            ? { id: SOURCE, name: sourceDetails.name }
-            : undefined,
-      getByIdWithDetails: (id: string) =>
-        id === GATE ? gateDetails : id === SOURCE ? sourceDetails : undefined,
+      // One set of mutable objects behind every accessor: a fake where they
+      // disagree lets a test change a name and prove nothing.
+      getAll: () => all.map((e) => ({ id: e.id, name: e.name, type: e.type })),
+      getById: (id: string) => {
+        const e = all.find((x) => x.id === id);
+        return e ? { id: e.id, name: e.name, type: e.type } : undefined;
+      },
+      getByIdWithDetails: (id: string) => all.find((x) => x.id === id),
     },
     dispatchOrder: async (equipmentId: string, alias: string, value: unknown) => {
       orders.push({ equipmentId, alias, value });
@@ -79,11 +92,19 @@ function makeCtx(over: Record<string, unknown> = {}) {
     },
   };
 
-  const handlerFor = (type: string): Handler => handlers[handlerTypes.indexOf(type)];
-  return { ctx, logs, orders, state, handlers, handlerFor, unsubs, gateDetails, sourceDetails };
+  const fire = (type: string, event: Record<string, unknown>) => {
+    handlers.forEach((h, i) => { if (h.type === type && !unsubs.includes(i)) h.handler(event); });
+  };
+  /** The plugin, pressing: it names the gate first, then moves the counter. */
+  const press = (count: number, target = GATE) => {
+    source.dataBindings[1].value = target;
+    fire("equipment.data.changed", { equipmentId: SOURCE, alias: "requests", value: count });
+  };
+  const catalogs = () => orders.filter((o) => o.alias === "gate_catalog").map((o) => JSON.parse(o.value as string));
+  return { ctx, logs, orders, state, fire, press, catalogs, unsubs, handlers, source, gate, garage, all };
 }
 
-const PARAMS = { zone: "z1", requestSource: SOURCE, gate: GATE };
+const PARAMS = { zone: "z1", requestSource: SOURCE };
 
 /** Lets the fire-and-forget promises inside the handlers settle. */
 const settle = () => new Promise((done) => setTimeout(done, 0));
@@ -133,6 +154,16 @@ describe("readGateState", () => {
   });
 });
 
+describe("buildCatalog", () => {
+  it("lists every gate of the house, by name, with its contact — and nothing else", () => {
+    const { ctx } = makeCtx();
+    expect(buildCatalog(ctx)).toEqual([
+      { id: GARAGE, name: "Garage", state: "open" },
+      { id: GATE, name: "Portail d'entrée", state: "closed" },
+    ]);
+  });
+});
+
 // ------------------------------------------------------------
 // validate
 // ------------------------------------------------------------
@@ -140,38 +171,28 @@ describe("readGateState", () => {
 describe("validate", () => {
   const recipe = createRecipe();
 
-  it("requires the zone, the source and the gate", () => {
+  it("requires the zone and the source — and no gate: those are picked in the plugin", () => {
     const { ctx } = makeCtx();
-    expect(() => recipe.validate({}, ctx as never)).toThrow(/Zone/);
-    expect(() => recipe.validate({ zone: "z1" }, ctx as never)).toThrow(/guest-access equipment is required/);
-    expect(() => recipe.validate({ zone: "z1", requestSource: SOURCE }, ctx as never)).toThrow(/gate is required/);
+    expect(() => recipe.validate({ requestSource: SOURCE }, ctx)).toThrow(/Zone/);
+    expect(() => recipe.validate({ zone: "z1" }, ctx)).toThrow(/guest-access equipment is required/);
+    expect(() => recipe.validate(PARAMS, ctx)).not.toThrow();
+    expect(recipe.slots.map((s) => s.id)).not.toContain("gate");
   });
 
-  it("refuses a source that cannot answer the guest", () => {
-    const { ctx, sourceDetails } = makeCtx();
-    sourceDetails.orderBindings = [{ alias: "gate_state", enumValues: [] }];
-    expect(() => recipe.validate(PARAMS, ctx as never)).toThrow(/« result » order/);
-    // Without it the recipe could open the gate and never tell the guest anything.
+  it("refuses a source that cannot answer the guest or receive the gates", () => {
+    for (const alias of ["result", "gate_catalog"]) {
+      const { ctx, source } = makeCtx();
+      source.orderBindings = source.orderBindings.filter((o) => o.alias !== alias);
+      expect(() => recipe.validate(PARAMS, ctx)).toThrow(new RegExp(alias));
+    }
   });
 
-  it("refuses a source whose counter is not there under the name given", () => {
-    const { ctx } = makeCtx();
-    expect(() => recipe.validate({ ...PARAMS, requestAlias: "compteur" }, ctx as never)).toThrow(/« compteur » reading/);
-  });
-
-  it("refuses an equipment that is not a gate, and a gate without the command", () => {
-    const { ctx, gateDetails } = makeCtx();
-    gateDetails.type = "light_onoff";
-    expect(() => recipe.validate(PARAMS, ctx as never)).toThrow(/not a gate/);
-
-    gateDetails.type = "gate";
-    gateDetails.orderBindings = [{ alias: "autre", enumValues: [] }];
-    expect(() => recipe.validate(PARAMS, ctx as never)).toThrow(/« command » order/);
-  });
-
-  it("accepts the standard installation", () => {
-    const { ctx } = makeCtx();
-    expect(() => recipe.validate(PARAMS, ctx as never)).not.toThrow();
+  it("refuses a source without the counter or the gate it names", () => {
+    const { ctx, source } = makeCtx();
+    source.dataBindings = source.dataBindings.filter((d) => d.alias !== "last_request_gate");
+    expect(() => recipe.validate(PARAMS, ctx)).toThrow(/last_request_gate/);
+    const other = makeCtx();
+    expect(() => recipe.validate({ ...PARAMS, requestAlias: "hits" }, other.ctx)).toThrow(/hits/);
   });
 });
 
@@ -179,251 +200,176 @@ describe("validate", () => {
 // the instance
 // ------------------------------------------------------------
 
-describe("a guest presses", () => {
-  it("sends the command and reports « opened »", async () => {
-    const { ctx, orders, handlers, state } = makeCtx({ initialCount: 4 });
-    const instance = createRecipe().createInstance(PARAMS, ctx as never);
-
-    handlers[0]({ equipmentId: SOURCE, alias: "requests", value: 5 });
+describe("a request", () => {
+  it("pulses the gate the plugin named, and reports « opened »", async () => {
+    const h = makeCtx();
+    createRecipe().createInstance(PARAMS, h.ctx);
+    h.press(5, GARAGE);
     await settle();
+    expect(h.orders.filter((o) => o.alias !== "gate_catalog")).toEqual([
+      { equipmentId: GARAGE, alias: "command", value: "pulse" },
+      { equipmentId: SOURCE, alias: "result", value: "opened" },
+    ]);
+  });
 
-    const gateOrder = orders.find((o) => o.equipmentId === GATE);
-    expect(gateOrder).toEqual({ equipmentId: GATE, alias: "command", value: "pulse" });
-    expect(orders.some((o) => o.alias === "result" && o.value === "opened")).toBe(true);
-    expect(state.get("openedCount")).toBe(1);
-    expect(String(state.get("summary"))).toMatch(/Armé — 1 ouverture/);
-    instance.stop();
+  it("will not pulse anything that is not a gate, whatever the plugin names", async () => {
+    for (const target of [LAMP, "nowhere", ""]) {
+      const h = makeCtx();
+      createRecipe().createInstance(PARAMS, h.ctx);
+      h.press(5, target);
+      await settle();
+      expect(h.orders.some((o) => o.alias === "command")).toBe(false);
+      expect(h.orders.at(-1)).toEqual({ equipmentId: SOURCE, alias: "result", value: "error" });
+    }
   });
 
   it("does NOT look at whether the gate is open first — a guest may close it behind them", async () => {
-    const { ctx, orders, handlers } = makeCtx({ initialCount: 4, gateState: "open" });
-    const instance = createRecipe().createInstance(PARAMS, ctx as never);
-
-    handlers[0]({ equipmentId: SOURCE, alias: "requests", value: 5 });
+    const h = makeCtx({ gateState: "open" });
+    createRecipe().createInstance(PARAMS, h.ctx);
+    h.press(5);
     await settle();
-
-    expect(orders.some((o) => o.equipmentId === GATE && o.value === "pulse")).toBe(true);
-    expect(orders.some((o) => o.alias === "result" && o.value === "opened")).toBe(true);
-    instance.stop();
+    expect(h.orders).toContainEqual({ equipmentId: GATE, alias: "command", value: "pulse" });
   });
 
-  it("a restart never opens the gate", async () => {
-    const { ctx, orders, handlers } = makeCtx({ initialCount: 9 });
-    const instance = createRecipe().createInstance(PARAMS, ctx as never);
-
-    // The counter is republished as it stands when the instance comes up.
-    handlers[0]({ equipmentId: SOURCE, alias: "requests", value: 9 });
+  it("a restart never opens a gate", async () => {
+    const h = makeCtx({ initialCount: 9 });
+    createRecipe().createInstance(PARAMS, h.ctx);
+    h.press(9);
     await settle();
-
-    expect(orders.some((o) => o.equipmentId === GATE)).toBe(false);
-    instance.stop();
+    expect(h.orders.some((o) => o.alias === "command")).toBe(false);
   });
 
   it("an instance that starts with no reading at all still does not fire on the first one", async () => {
-    const { ctx, orders, handlers, sourceDetails } = makeCtx();
-    sourceDetails.dataBindings = [{ alias: "requests", category: "generic", value: undefined }];
-    const instance = createRecipe().createInstance(PARAMS, ctx as never);
-
-    handlers[0]({ equipmentId: SOURCE, alias: "requests", value: 3 });
+    const h = makeCtx();
+    h.source.dataBindings[0].value = undefined;
+    createRecipe().createInstance(PARAMS, h.ctx);
+    h.press(3);
     await settle();
-    expect(orders.some((o) => o.equipmentId === GATE)).toBe(false);
-
-    // ...and the one after it does.
-    handlers[0]({ equipmentId: SOURCE, alias: "requests", value: 4 });
+    expect(h.orders.some((o) => o.alias === "command")).toBe(false);
+    h.press(4);
     await settle();
-    expect(orders.some((o) => o.equipmentId === GATE)).toBe(true);
-    instance.stop();
+    expect(h.orders.filter((o) => o.alias === "command")).toHaveLength(1);
   });
 
   it("ignores a repeated reading, a lower one, and another equipment's", async () => {
-    const { ctx, orders, handlers } = makeCtx({ initialCount: 4 });
-    const instance = createRecipe().createInstance(PARAMS, ctx as never);
-
-    handlers[0]({ equipmentId: SOURCE, alias: "requests", value: 4 });
-    handlers[0]({ equipmentId: SOURCE, alias: "requests", value: 3 });
-    handlers[0]({ equipmentId: SOURCE, alias: "autre", value: 99 });
-    handlers[0]({ equipmentId: "eq-autre", alias: "requests", value: 99 });
+    const h = makeCtx();
+    createRecipe().createInstance(PARAMS, h.ctx);
+    h.press(4);
+    h.press(3);
+    h.fire("equipment.data.changed", { equipmentId: "elsewhere", alias: "requests", value: 99 });
     await settle();
-
-    expect(orders.some((o) => o.equipmentId === GATE)).toBe(false);
-    instance.stop();
+    expect(h.orders.some((o) => o.alias === "command")).toBe(false);
   });
 
-  it("counts each request once, and keeps counting", async () => {
-    const { ctx, orders, handlers, state } = makeCtx({ initialCount: 0 });
-    const instance = createRecipe().createInstance(PARAMS, ctx as never);
-
-    for (const value of [1, 2, 3]) {
-      handlers[0]({ equipmentId: SOURCE, alias: "requests", value });
-      await settle();
-    }
-
-    expect(orders.filter((o) => o.equipmentId === GATE)).toHaveLength(3);
-    expect(state.get("openedCount")).toBe(3);
-    instance.stop();
+  it("uses the command the instance was configured with", async () => {
+    const h = makeCtx();
+    createRecipe().createInstance({ ...PARAMS, commandAlias: "trigger", commandValue: "on" }, h.ctx);
+    h.press(5);
+    await settle();
+    expect(h.orders).toContainEqual({ equipmentId: GATE, alias: "trigger", value: "on" });
   });
 });
 
 describe("when the access is cut", () => {
-  it("reports « refused » and never touches the gate", async () => {
-    const { ctx, orders, handlers, logs, state } = makeCtx({ initialCount: 4 });
-    const instance = createRecipe().createInstance(PARAMS, ctx as never);
-    instance.onAction!("set_guest_access", { value: "off" });
-
-    handlers[0]({ equipmentId: SOURCE, alias: "requests", value: 5 });
+  it("reports « refused » and never touches a gate", async () => {
+    const h = makeCtx({ state: [["guestAccess", "off"]] });
+    createRecipe().createInstance(PARAMS, h.ctx);
+    h.press(5);
     await settle();
-
-    expect(orders.some((o) => o.equipmentId === GATE)).toBe(false);
-    expect(orders.some((o) => o.alias === "result" && o.value === "refused")).toBe(true);
-    // A cut access must not fail silently: the guest's phone says so.
-    expect(logs.some((l) => l.level === "warn" && /coupé/.test(l.message))).toBe(true);
-    expect(state.get("summary")).toBe("Accès partagés coupés");
-    instance.stop();
+    expect(h.orders.some((o) => o.alias === "command")).toBe(false);
+    expect(h.orders.at(-1)).toEqual({ equipmentId: SOURCE, alias: "result", value: "refused" });
   });
 
-  it("the switch survives a restart", async () => {
-    const { ctx, orders, handlers } = makeCtx({ initialCount: 4, state: [["guestAccess", "off"]] });
-    const instance = createRecipe().createInstance(PARAMS, ctx as never);
-
-    handlers[0]({ equipmentId: SOURCE, alias: "requests", value: 5 });
-    await settle();
-
-    expect(orders.some((o) => o.equipmentId === GATE)).toBe(false);
-    instance.stop();
-  });
-
-  it("the tile toggles it both ways", () => {
-    const { ctx, state } = makeCtx();
-    const instance = createRecipe().createInstance(PARAMS, ctx as never);
-
-    expect(state.get("guestAccess")).toBe("on");
-    instance.onAction!("set_guest_access", {});
-    expect(state.get("guestAccess")).toBe("off");
-    instance.onAction!("set_guest_access", {});
-    expect(state.get("guestAccess")).toBe("on");
-    instance.onAction!("unknown_action", {});
-    expect(state.get("guestAccess")).toBe("on");
-    instance.stop();
+  it("the tile toggles it both ways, and the switch survives a restart", () => {
+    const h = makeCtx();
+    const instance = createRecipe().createInstance(PARAMS, h.ctx);
+    instance.onAction?.("set_guest_access");
+    expect(h.state.get("guestAccess")).toBe("off");
+    instance.onAction?.("set_guest_access", { value: "on" });
+    expect(h.state.get("guestAccess")).toBe("on");
+    instance.onAction?.("set_guest_access", { value: "off" });
+    const again = makeCtx({ state: [["guestAccess", "off"]] });
+    createRecipe().createInstance(PARAMS, again.ctx);
+    expect(again.state.get("summary")).toBe("Accès partagés coupés");
   });
 });
 
 describe("when the gate refuses the command", () => {
   it("reports « error » rather than letting the guest believe it opened", async () => {
-    const { ctx, orders, handlers, logs } = makeCtx({ initialCount: 4, failOrder: { alias: "command", error: "nœud muet" } });
-    const instance = createRecipe().createInstance(PARAMS, ctx as never);
-
-    handlers[0]({ equipmentId: SOURCE, alias: "requests", value: 5 });
+    const h = makeCtx({ failOrder: { alias: "command" } });
+    createRecipe().createInstance(PARAMS, h.ctx);
+    h.press(5);
     await settle();
-
-    expect(orders.some((o) => o.alias === "result" && o.value === "error")).toBe(true);
-    expect(logs.some((l) => l.level === "error" && /nœud muet/.test(l.message))).toBe(true);
-    instance.stop();
+    expect(h.orders.at(-1)).toEqual({ equipmentId: SOURCE, alias: "result", value: "error" });
   });
 
   it("a thrown dispatch is handled the same way", async () => {
-    const { ctx, orders, handlers } = makeCtx({ initialCount: 4, failOrder: { alias: "command", error: "throw" } });
-    const instance = createRecipe().createInstance(PARAMS, ctx as never);
-
-    handlers[0]({ equipmentId: SOURCE, alias: "requests", value: 5 });
+    const h = makeCtx({ failOrder: { alias: "command", error: "throw" } });
+    createRecipe().createInstance(PARAMS, h.ctx);
+    h.press(5);
     await settle();
-
-    expect(orders.some((o) => o.alias === "result" && o.value === "error")).toBe(true);
-    instance.stop();
+    expect(h.orders.at(-1)).toEqual({ equipmentId: SOURCE, alias: "result", value: "error" });
   });
 });
 
-describe("the gate state pushed to the plugin", () => {
-  it("is sent at start, so the owner's page is right from the first look", async () => {
-    const { ctx, orders } = makeCtx({ gateState: "closed" });
-    const instance = createRecipe().createInstance(PARAMS, ctx as never);
+describe("the gates handed to the plugin", () => {
+  it("are sent at start, so the owner can pick from them at once", async () => {
+    const h = makeCtx();
+    createRecipe().createInstance(PARAMS, h.ctx);
     await settle();
-
-    // The name of what opens leaves at start too; this is about the contact.
-    expect(orders.filter((o) => o.alias === "gate_state")).toEqual([
-      { equipmentId: SOURCE, alias: "gate_state", value: "closed" },
+    expect(h.catalogs()).toEqual([
+      [
+        { id: GARAGE, name: "Garage", state: "open" },
+        { id: GATE, name: "Portail d'entrée", state: "closed" },
+      ],
     ]);
-    instance.stop();
   });
 
-  it("follows the contact, and only on a change", async () => {
-    const { ctx, orders, handlers, gateDetails } = makeCtx({ gateState: "closed" });
-    const instance = createRecipe().createInstance(PARAMS, ctx as never);
+  it("follow a contact, a rename, a new gate — and are never sent twice the same", async () => {
+    const h = makeCtx();
+    createRecipe().createInstance(PARAMS, h.ctx);
     await settle();
-    const before = orders.filter((o) => o.alias === "gate_state").length;
+    // A reading that repeats itself changes nothing.
+    h.fire("equipment.data.changed", { equipmentId: GATE, alias: "state", value: "closed" });
+    await settle();
+    expect(h.catalogs()).toHaveLength(1);
 
-    gateDetails.dataBindings = [{ alias: "state", category: "gate_state", value: "open" }];
-    handlers[1]({ equipmentId: GATE, alias: "state", value: "open" });
+    h.gate.dataBindings[0].value = "open";
+    h.fire("equipment.data.changed", { equipmentId: GATE, alias: "state", value: "open" });
     await settle();
-    handlers[1]({ equipmentId: GATE, alias: "state", value: "open" });
-    await settle();
+    expect(h.catalogs().at(-1)).toContainEqual({ id: GATE, name: "Portail d'entrée", state: "open" });
 
-    const pushes = orders.filter((o) => o.alias === "gate_state");
-    expect(pushes).toHaveLength(before + 1);
-    expect(pushes[pushes.length - 1].value).toBe("open");
-    instance.stop();
+    h.gate.name = "Grand portail";
+    h.fire("equipment.updated", { equipment: { id: GATE, name: "Grand portail" } });
+    await settle();
+    expect(h.catalogs().at(-1).map((g: { name: string }) => g.name)).toContain("Grand portail");
+
+    h.all.push({ id: "eq-new", name: "Portillon", type: "gate", dataBindings: [], orderBindings: [] });
+    h.fire("equipment.created", { equipment: { id: "eq-new", type: "gate" } });
+    await settle();
+    expect(h.catalogs().at(-1)).toHaveLength(3);
   });
 
-  it("a failure to push it is a warning, never fatal", async () => {
-    const { ctx, logs, handlers, orders } = makeCtx({ initialCount: 4, failOrder: { alias: "gate_state", error: "throw" } });
-    const instance = createRecipe().createInstance(PARAMS, ctx as never);
+  it("a failure to send them is a warning, never fatal", async () => {
+    const h = makeCtx({ failOrder: { alias: "gate_catalog", error: "throw" } });
+    createRecipe().createInstance(PARAMS, h.ctx);
     await settle();
-
-    expect(logs.some((l) => l.level === "warn")).toBe(true);
-    // And the gate still opens: a mislabelled button is cosmetic.
-    handlers[0]({ equipmentId: SOURCE, alias: "requests", value: 5 });
+    expect(h.logs.some((l) => l.level === "warn" && /portails/.test(l.message))).toBe(true);
+    h.press(5);
     await settle();
-    expect(orders.some((o) => o.equipmentId === GATE)).toBe(true);
-    instance.stop();
-  });
-});
-
-describe("the name of what opens", () => {
-  it("hands the plugin the gate's own name, as soon as it starts", async () => {
-    const { ctx, orders } = makeCtx();
-    createRecipe().createInstance(PARAMS, ctx as never);
-    await settle();
-    expect(orders).toContainEqual({ equipmentId: SOURCE, alias: "opening_label", value: "Portail" });
-  });
-
-  it("says it again when the equipment is renamed, and only then", async () => {
-    const { ctx, orders, handlerFor, gateDetails } = makeCtx();
-    createRecipe().createInstance(PARAMS, ctx as never);
-    await settle();
-    const sent = () => orders.filter((o) => o.alias === "opening_label").map((o) => o.value);
-
-    // An unrelated edit, or an edit to the same name, is not news.
-    handlerFor("equipment.updated")({ equipment: { id: GATE, name: "Portail" } });
-    await settle();
-    expect(sent()).toEqual(["Portail"]);
-
-    gateDetails.name = "Porte du garage";
-    handlerFor("equipment.updated")({ equipment: { id: GATE, name: "Porte du garage" } });
-    await settle();
-    expect(sent()).toEqual(["Portail", "Porte du garage"]);
-  });
-
-  it("stays quiet on an equipment bound before the plugin declared the order", async () => {
-    // Not an error: the visitor's page keeps its neutral title. Warning on
-    // every start about it would teach the owner to ignore the log.
-    const { ctx, orders, logs } = makeCtx({ labelBound: false });
-    createRecipe().createInstance(PARAMS, ctx as never);
-    await settle();
-    expect(orders.some((o) => o.alias === "opening_label")).toBe(false);
-    expect(logs.some((l) => l.level === "warn")).toBe(false);
+    expect(h.orders).toContainEqual({ equipmentId: GATE, alias: "command", value: "pulse" });
   });
 });
 
 describe("stop", () => {
-  it("unsubscribes all three watches and stops acting", async () => {
-    const { ctx, orders, handlers, unsubs } = makeCtx({ initialCount: 4 });
-    const instance = createRecipe().createInstance(PARAMS, ctx as never);
+  it("unsubscribes every watch and stops acting", async () => {
+    const h = makeCtx();
+    const instance = createRecipe().createInstance(PARAMS, h.ctx);
     instance.stop();
-
-    // The counter, the gate's contact, and the gate's name.
-    expect(unsubs).toHaveLength(3);
-    handlers[0]({ equipmentId: SOURCE, alias: "requests", value: 5 });
+    expect(h.unsubs).toHaveLength(h.handlers.length);
+    h.press(5);
     await settle();
-    expect(orders.some((o) => o.equipmentId === GATE)).toBe(false);
+    expect(h.orders.some((o) => o.alias === "command")).toBe(false);
   });
 });
 

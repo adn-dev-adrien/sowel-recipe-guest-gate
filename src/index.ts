@@ -11,8 +11,9 @@
 //
 //   1. **Nothing that decides also actuates.** The plugin serves an anonymous page on the internet
 //      (Sowel core spec 180) and holds the accesses; it publishes a counter and nothing else. The
-//      equipment that opens is chosen here, by an admin, in a recipe instance — so a flaw in the
-//      guest-facing half cannot become a gate command on its own.
+//      recipe only ever actuates an equipment of type `gate`, and only one the owner picked in the
+//      plugin's page — so a flaw in the guest-facing half can at worst open a gate, never switch
+//      anything else in the house.
 //   2. **You keep a switch.** The Dashboard tile arms and disarms guest access in one click, without
 //      opening the accesses page and without waiting for anything. A disarmed access does not fail
 //      silently: the guest's phone says the command was refused from the house.
@@ -30,10 +31,12 @@
 //     `portal-night-closure` is what does that, and two automations each holding their own deadline
 //     on an impulse gate send two impulses for one opening.
 //
-// The gate contact travels the other way, and that is not decoration: a plugin cannot read another
-// integration's device, so this recipe reads it and pushes it down. The GUEST never sees it — a
+// ONE instance serves the whole house (v0.4). A plugin cannot read another integration's devices,
+// so this recipe hands it the catalogue of the house's gates — id, name, contact — and the owner
+// picks from it in the plugin's page (« + portail »). Each request then names its gate, and this
+// recipe pulses that one. The contact is for the owner's page only: the GUEST never sees it — a
 // button reading « Fermer le portail » is a state display wearing a verb, and the guests' page is
-// pollable by anyone holding a code. The owner sees it, on the « Accès invités » page.
+// pollable by anyone holding a code.
 // ============================================================
 
 // ------------------------------------------------------------
@@ -105,15 +108,16 @@ interface RecipeContext {
       type: "equipment.data.changed",
       handler: (event: { equipmentId: string; alias: string; value: unknown }) => void,
     ): () => void;
-    /** Fired on any edit of an equipment — its name among them. */
+    /** Fired on any edit, creation or removal of an equipment — its name among them. */
     onType(
-      type: "equipment.updated",
-      handler: (event: { equipment?: { id: string; name?: string } }) => void,
+      type: "equipment.updated" | "equipment.created" | "equipment.removed",
+      handler: (event: { equipment?: { id: string; name?: string; type?: string }; equipmentId?: string }) => void,
     ): () => void;
   };
   equipmentManager: {
-    getById(id: string): { id: string; name?: string; type?: string } | undefined;
-    getByIdWithDetails(id: string): EquipmentDetails | undefined;
+    getAll(): Array<{ id: string; name?: string; type?: string }>;
+    getById(id: string): { id: string; name?: string; type?: string } | undefined | null;
+    getByIdWithDetails(id: string): EquipmentDetails | undefined | null;
   };
   dispatchOrder(
     equipmentId: string,
@@ -140,14 +144,15 @@ interface RecipeDefinition {
 }
 
 // ------------------------------------------------------------
-// The plugin's own order aliases. Not slots: they belong to
+// The plugin's own aliases. Not slots: they belong to
 // sowel-plugin-guest-access, which ships them, so exposing them as fields would
 // only offer the user a way to get them wrong.
 // ------------------------------------------------------------
 const RESULT_ALIAS = "result";
-const GATE_STATE_ALIAS = "gate_state";
-/** What opens, by its equipment name — the title of the visitor's page. */
-const OPENING_LABEL_ALIAS = "opening_label";
+/** The house's gates, as JSON, pushed down so the owner can pick from them. */
+const CATALOG_ALIAS = "gate_catalog";
+/** Which gate the request in flight is for — an equipment id. */
+const TARGET_ALIAS = "last_request_gate";
 
 const ACCESS_OPTIONS = [
   { value: "on", label: "Armed" },
@@ -156,13 +161,20 @@ const ACCESS_OPTIONS = [
 
 type GateState = "open" | "closed" | "unknown";
 
+/** One gate of the house, as the plugin is told about it. */
+export interface CatalogEntry {
+  id: string;
+  name: string;
+  state: GateState;
+}
+
 /**
  * Reads the gate's belief from its bindings, by CATEGORY rather than by alias:
  * `gate_state` when the equipment has one (the virtual reading Sowel derives),
  * else the raw door contact. Deriving by category means no alias slot to fill in,
  * and it survives an installation whose aliases are named differently.
  */
-export function readGateState(details: EquipmentDetails | undefined): GateState {
+export function readGateState(details: EquipmentDetails | undefined | null): GateState {
   const bindings = details?.dataBindings ?? [];
 
   const derived = bindings.find((b) => b.category === "gate_state");
@@ -187,12 +199,25 @@ export function isNewRequest(previous: number | null, incoming: unknown): boolea
   return incoming > previous;
 }
 
+/** Every equipment of type `gate`, sorted by name — the only things this recipe will ever pulse. */
+export function buildCatalog(ctx: Pick<RecipeContext, "equipmentManager">): CatalogEntry[] {
+  return ctx.equipmentManager
+    .getAll()
+    .filter((e) => e.type === "gate")
+    .map((e) => ({
+      id: e.id,
+      name: (e.name ?? e.id).trim(),
+      state: readGateState(ctx.equipmentManager.getByIdWithDetails(e.id)),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name, "fr"));
+}
+
 const FR = {
   name: "Accès partagés — ouverture",
   description:
-    "Ouvre quand une personne à qui vous avez donné un accès le demande depuis son téléphone — un invité, un enfant, un artisan. Armable depuis le Dashboard, et toujours elle qui décide.",
+    "Ouvre le portail qu'une personne à qui vous avez donné un accès demande depuis son téléphone — un invité, un enfant, un artisan. Une seule pour toute la maison ; les portails se choisissent dans la page Accès partagés. Armable depuis le Dashboard.",
   slots: {
-    zone: { name: "Zone", description: "La zone où se trouve ce qui s'ouvre" },
+    zone: { name: "Zone", description: "La zone où ranger la tuile" },
     requestSource: {
       name: "Demandes d'ouverture",
       description:
@@ -202,10 +227,9 @@ const FR = {
       name: "Alias du compteur",
       description: "L'alias de la donnée qui compte les demandes. « requests » sauf si vous l'avez renommé.",
     },
-    gate: { name: "Ce qui s'ouvre", description: "Le portail, la porte ou le garage à ouvrir" },
     commandAlias: {
       name: "Alias de la commande",
-      description: "L'ordre à envoyer. « command » sur une installation LoRa/Somfy standard.",
+      description: "L'ordre à envoyer au portail. « command » sur une installation LoRa/Somfy standard.",
     },
     commandValue: {
       name: "Valeur de la commande",
@@ -222,7 +246,7 @@ const FR = {
 
 function buildSlots(): RecipeSlotDef[] {
   return [
-    { id: "zone", name: "Zone", description: "The zone the thing that opens lives in", type: "zone", required: true },
+    { id: "zone", name: "Zone", description: "The zone the tile lives in", type: "zone", required: true },
     {
       id: "requestSource",
       name: "Opening requests",
@@ -230,8 +254,9 @@ function buildSlots(): RecipeSlotDef[] {
         "The equipment bound to the Shared access plugin's device (« Accès invités ») — the one counting the requests.",
       type: "equipment",
       required: true,
-      // No type constraint on purpose: the device carries a counter and two enum
-      // orders, and which equipment type a user binds that to is their business.
+      // No type constraint on purpose: the device carries a counter and a few
+      // readings and orders, and which equipment type a user binds that to is
+      // their business.
       constraints: { crossZone: true },
     },
     {
@@ -243,17 +268,9 @@ function buildSlots(): RecipeSlotDef[] {
       defaultValue: "requests",
     },
     {
-      id: "gate",
-      name: "What opens",
-      description: "The gate, door or garage to open",
-      type: "equipment",
-      required: true,
-      constraints: { equipmentType: "gate", crossZone: true },
-    },
-    {
       id: "commandAlias",
       name: "Command alias",
-      description: "The order to send to the gate. `command` on a standard LoRa/Somfy installation.",
+      description: "The order to send to a gate. `command` on a standard LoRa/Somfy installation.",
       type: "text",
       required: false,
       defaultValue: "command",
@@ -279,7 +296,7 @@ export function createRecipe(): RecipeDefinition {
     id: "guest-gate",
     name: "Shared Access — Opening",
     description:
-      "Opens when someone you gave access to asks for it from their phone — a guest, a child, a tradesperson. Armable from the Dashboard, and always the one that decides.",
+      "Opens the gate someone you gave access to asks for from their phone — a guest, a child, a tradesperson. One for the whole house; gates are picked in the Shared access page. Armable from the Dashboard.",
     slots: buildSlots(),
 
     actions: [
@@ -310,10 +327,10 @@ export function createRecipe(): RecipeDefinition {
       const source = ctx.equipmentManager.getByIdWithDetails(sourceId);
       if (!source) throw new Error("Guest-access equipment not found");
 
-      // A precise error beats a silent misconfiguration: without these two orders
-      // the recipe could open the gate but never tell the guest anything.
+      // A precise error beats a silent misconfiguration: without these the
+      // recipe could neither tell the guest anything nor offer a gate to pick.
       const orders = (source.orderBindings ?? []).map((o) => o.alias);
-      for (const alias of [RESULT_ALIAS, GATE_STATE_ALIAS]) {
+      for (const alias of [RESULT_ALIAS, CATALOG_ALIAS]) {
         if (!orders.includes(alias)) {
           throw new Error(
             `The guest-access equipment carries no « ${alias} » order — bind the plugin's device orders to it`,
@@ -323,33 +340,17 @@ export function createRecipe(): RecipeDefinition {
 
       const requestAlias = textParam(params, "requestAlias", "requests");
       const data = (source.dataBindings ?? []).map((d) => d.alias);
-      if (data.length && !data.includes(requestAlias)) {
-        throw new Error(
-          `The guest-access equipment has no « ${requestAlias} » reading (found: ${data.join(", ") || "none"})`,
-        );
-      }
-
-      const gateId = typeof params.gate === "string" ? params.gate : "";
-      if (!gateId) throw new Error("A gate is required");
-      const gate = ctx.equipmentManager.getById(gateId);
-      if (!gate) throw new Error("Gate not found");
-      if (gate.type !== undefined && gate.type !== "gate") {
-        throw new Error(`Selected equipment is not a gate (type: ${gate.type})`);
-      }
-
-      const gateDetails = ctx.equipmentManager.getByIdWithDetails(gateId);
-      const commandAlias = textParam(params, "commandAlias", "command");
-      const gateOrders = (gateDetails?.orderBindings ?? []).map((o) => o.alias);
-      if (gateOrders.length && !gateOrders.includes(commandAlias)) {
-        throw new Error(
-          `The gate carries no « ${commandAlias} » order (found: ${gateOrders.join(", ") || "none"})`,
-        );
+      for (const alias of [requestAlias, TARGET_ALIAS]) {
+        if (data.length && !data.includes(alias)) {
+          throw new Error(
+            `The guest-access equipment has no « ${alias} » reading (found: ${data.join(", ") || "none"})`,
+          );
+        }
       }
     },
 
     createInstance(params, ctx) {
       const sourceId = params.requestSource as string;
-      const gateId = params.gate as string;
       const requestAlias = textParam(params, "requestAlias", "requests");
       const commandAlias = textParam(params, "commandAlias", "command");
       const commandValue = textParam(params, "commandValue", "pulse");
@@ -359,14 +360,13 @@ export function createRecipe(): RecipeDefinition {
       let lastCount: number | null = null;
       let openedCount = 0;
       let lastOpenedAt: string | null = null;
-      let lastGateState: GateState | null = null;
+      let lastCatalog = "";
+      let gateIds = new Set<string>();
 
       // Restored across a restart: a recipe update stops and recreates the
       // instance, and the switch must not silently re-arm itself.
       const restored = ctx.state.get("guestAccess");
       let access: "on" | "off" = restored === "off" ? "off" : "on";
-
-      const gateName = (): string => ctx.equipmentManager.getById(gateId)?.name ?? "l'ouverture";
 
       const summaryLine = (): string => {
         if (access === "off") return "Accès partagés coupés";
@@ -388,56 +388,42 @@ export function createRecipe(): RecipeDefinition {
           timeZone: "Europe/Paris",
         }).format(new Date());
 
-      /** Tells the plugin what the contact says, for the owner's page. */
-      const pushGateState = async (state: GateState): Promise<void> => {
-        if (state === lastGateState) return;
-        lastGateState = state;
-        try {
-          await ctx.dispatchOrder(sourceId, GATE_STATE_ALIAS, state);
-        } catch (err: unknown) {
-          // Never fatal: an owner's page showing a stale contact is a cosmetic
-          // problem, and the pulse still works.
-          const msg = err instanceof Error ? err.message : String(err);
-          ctx.log(`état du portail non transmis au plugin — ${msg}`, "warn");
-        }
-      };
-
       /**
-       * Tells the plugin what the equipment is called, so the visitor's page is
-       * titled « Porte du garage » rather than a word chosen for somebody else's
-       * house. Only this recipe knows which equipment it drives, and the plugin
-       * is meant not to: it is handed the name, nothing more.
-       *
-       * Skipped without a word when the plugin's equipment has no such order —
-       * one bound before the order existed. The page then keeps its neutral
-       * title, which is a lesser page, not a broken one.
+       * Hands the plugin the house's gates — names and contacts. Sent at start
+       * and whenever one of them is created, renamed, removed or moves; never
+       * twice the same, since a contact reading repeats itself all day.
        */
-      let lastOpeningLabel: string | null = null;
-      const pushOpeningLabel = async (): Promise<void> => {
-        const name = ctx.equipmentManager.getById(gateId)?.name?.trim();
-        if (!name || name === lastOpeningLabel) return;
-        const source = ctx.equipmentManager.getByIdWithDetails(sourceId);
-        const bound = (source?.orderBindings ?? []).some((b) => b.alias === OPENING_LABEL_ALIAS);
-        if (!bound) return;
-        lastOpeningLabel = name;
+      const pushCatalog = async (): Promise<void> => {
+        const catalog = buildCatalog(ctx);
+        gateIds = new Set(catalog.map((g) => g.id));
+        const text = JSON.stringify(catalog);
+        if (text === lastCatalog) return;
+        lastCatalog = text;
         try {
-          await ctx.dispatchOrder(sourceId, OPENING_LABEL_ALIAS, name);
+          await ctx.dispatchOrder(sourceId, CATALOG_ALIAS, text);
         } catch (err: unknown) {
-          lastOpeningLabel = null;
+          // Never fatal: the owner's page shows a stale list, and every press
+          // still works on the gates it already knows.
+          lastCatalog = "";
           const msg = err instanceof Error ? err.message : String(err);
-          ctx.log(`nom de l'ouverture non transmis au plugin — ${msg}`, "warn");
+          ctx.log(`liste des portails non transmise au plugin — ${msg}`, "warn");
         }
       };
 
-      const report = async (outcome: "opened" | "refused" | "error", detail?: string): Promise<void> => {
+      const report = async (outcome: "opened" | "refused" | "error"): Promise<void> => {
         try {
           await ctx.dispatchOrder(sourceId, RESULT_ALIAS, outcome);
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err);
           ctx.log(`issue « ${outcome} » non transmise au plugin — ${msg}`, "error");
-          return;
         }
-        if (detail) ctx.log(detail);
+      };
+
+      /** The gate the request is for, as the plugin wrote it just before the counter moved. */
+      const readTarget = (): string => {
+        const source = ctx.equipmentManager.getByIdWithDetails(sourceId);
+        const binding = (source?.dataBindings ?? []).find((b) => b.alias === TARGET_ALIAS);
+        return typeof binding?.value === "string" ? binding.value : "";
       };
 
       const onRequest = async (): Promise<void> => {
@@ -445,23 +431,35 @@ export function createRecipe(): RecipeDefinition {
 
         if (access === "off") {
           ctx.log(`demande refusée : les accès partagés sont coupés`, "warn");
-          await report("refused", undefined);
+          await report("refused");
           publish();
           return;
         }
+
+        // Only a gate. Whatever the plugin names, this recipe will not pulse an
+        // equipment that is not one — the whole point of keeping the trigger here.
+        const targetId = readTarget();
+        const target = targetId ? ctx.equipmentManager.getById(targetId) : undefined;
+        if (!target || target.type !== "gate") {
+          ctx.log(`demande pour « ${targetId || "?"} », qui n'est pas un portail — rien n'est actionné`, "error");
+          await report("error");
+          publish();
+          return;
+        }
+        const name = target.name ?? targetId;
 
         // The command always goes out — no look at the gate's state first. See the
         // header: a guest is allowed to close the gate behind them.
         let failure: string | null = null;
         try {
-          const res = await ctx.dispatchOrder(gateId, commandAlias, commandValue);
+          const res = await ctx.dispatchOrder(targetId, commandAlias, commandValue);
           if (res && res.success === false) failure = res.error ?? "échec";
         } catch (err: unknown) {
           failure = err instanceof Error ? err.message : String(err);
         }
 
         if (failure) {
-          ctx.log(`${gateName()} : commande d'un accès partagé en échec — ${failure}`, "error");
+          ctx.log(`${name} : commande d'un accès partagé en échec — ${failure}`, "error");
           await report("error");
           publish();
           return;
@@ -469,61 +467,59 @@ export function createRecipe(): RecipeDefinition {
 
         openedCount += 1;
         lastOpenedAt = hhmm();
-        ctx.log(`${gateName()} : commande envoyée pour un accès partagé`);
+        ctx.log(`${name} : commande envoyée pour un accès partagé`);
         await report("opened");
         publish();
       };
 
       // --- wiring ---
 
-      const unsubRequests = ctx.eventBus.onType("equipment.data.changed", (event) => {
-        if (event.equipmentId !== sourceId) return;
-        if (event.alias !== requestAlias) return;
-        const incoming = event.value;
-        if (!isNewRequest(lastCount, incoming)) {
-          // Also the path taken by the very first reading after a start: the
-          // counter already has a value, and a restart must never open the gate.
-          if (typeof incoming === "number" && Number.isFinite(incoming)) lastCount = incoming;
+      const unsubData = ctx.eventBus.onType("equipment.data.changed", (event) => {
+        if (event.equipmentId === sourceId && event.alias === requestAlias) {
+          const incoming = event.value;
+          if (!isNewRequest(lastCount, incoming)) {
+            // Also the path taken by the very first reading after a start: the
+            // counter already has a value, and a restart must never open the gate.
+            if (typeof incoming === "number" && Number.isFinite(incoming)) lastCount = incoming;
+            return;
+          }
+          lastCount = incoming as number;
+          void onRequest();
           return;
         }
-        lastCount = incoming as number;
-        void onRequest();
+        // A gate moved: its contact goes to the owner's page.
+        if (gateIds.has(event.equipmentId)) void pushCatalog();
       });
 
-      const unsubGate = ctx.eventBus.onType("equipment.data.changed", (event) => {
-        if (event.equipmentId !== gateId) return;
-        void pushGateState(readGateState(ctx.equipmentManager.getByIdWithDetails(gateId)));
-      });
-
-      // A rename lands on the visitor's page without anyone thinking of it.
-      const unsubRename = ctx.eventBus.onType("equipment.updated", (event) => {
-        if (event.equipment?.id !== gateId) return;
-        void pushOpeningLabel();
-      });
+      // A gate created, renamed or removed lands in the owner's list without
+      // anyone thinking of it.
+      const onEquipment = (): void => void pushCatalog();
+      const unsubCreated = ctx.eventBus.onType("equipment.created", onEquipment);
+      const unsubUpdated = ctx.eventBus.onType("equipment.updated", onEquipment);
+      const unsubRemoved = ctx.eventBus.onType("equipment.removed", onEquipment);
 
       // Starting points: the counter as it stands (so nothing fires on a restart),
-      // and the contact as it stands (so the owner's page is right from the
-      // first look, not only after the gate next moves).
+      // and the gates as they stand (so the owner's page is right from the first look).
       const sourceDetails = ctx.equipmentManager.getByIdWithDetails(sourceId);
       const initial = (sourceDetails?.dataBindings ?? []).find((b) => b.alias === requestAlias);
       if (initial && typeof initial.value === "number" && Number.isFinite(initial.value)) {
         lastCount = initial.value;
       }
-      void pushGateState(readGateState(ctx.equipmentManager.getByIdWithDetails(gateId)));
-      void pushOpeningLabel();
+      void pushCatalog();
 
       publish();
       ctx.log(
-        `Recette démarrée : ${gateName()} ouvert sur demande — accès partagés ` +
+        `Recette démarrée : ${gateIds.size} portail${gateIds.size > 1 ? "s" : ""} proposé${gateIds.size > 1 ? "s" : ""} au plugin — accès partagés ` +
           `${access === "on" ? "armés" : "coupés"}, commande « ${commandAlias}=${commandValue} »`,
       );
 
       return {
         stop(): void {
           stopped = true;
-          unsubRequests();
-          unsubGate();
-          unsubRename();
+          unsubData();
+          unsubCreated();
+          unsubUpdated();
+          unsubRemoved();
         },
 
         onAction(action: string, payload?: Record<string, unknown>): void {

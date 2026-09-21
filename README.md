@@ -5,15 +5,17 @@ demande depuis son téléphone — un invité, un enfant, un artisan. Les demand
 plugin [Accès partagés](https://github.com/adn-dev-adrien/sowel-plugin-guest-access), qui tient
 les accès, les codes et la page d'ouverture ; cette recette est ce qui décide et actionne.
 
-Elle transmet aussi au plugin **le nom de l'équipement qu'elle pilote** : c'est lui qui titre la
-page d'ouverture sur le téléphone du visiteur, et il suit un renommage sans qu'on y pense.
+**Une seule instance pour toute la maison** (v0.4). Elle tend au plugin la liste des portails de la
+maison — les équipements de type `gate`, avec leur nom et leur contact — et c'est dans la page
+Accès partagés que le propriétaire choisit, avec « + portail », ceux qui auront une liste d'accès.
+Chaque demande désigne ensuite son portail, et la recette actionne celui-là.
 
 ## Pourquoi une recette, et pas le plugin lui-même
 
 Parce que **rien de ce qui décide ne doit aussi actionner**. Le plugin sert une page anonyme sur
-Internet et détient les accès ; tout ce qu'il fait ici, c'est publier un compteur. L'équipement qui
-s'ouvre, lui, est choisi par un administrateur, dans une instance de recette — si bien qu'une faille
-du côté client ne peut pas se transformer toute seule en commande de portail.
+Internet et détient les accès ; tout ce qu'il fait ici, c'est publier un compteur et le portail visé.
+La recette **n'actionne jamais qu'un équipement de type portail** : quoi que le plugin désigne, rien
+d'autre dans la maison ne peut être commandé par ce chemin.
 
 Et elle vous laisse un interrupteur : la tuile du Dashboard arme ou coupe l'accès invités en un clic,
 sans ouvrir la page des accès et sans attendre quoi que ce soit. Un accès coupé n'échoue pas en
@@ -33,10 +35,12 @@ silence — le téléphone du visiteur affiche que la commande a été refusée 
   charge, et deux automatisations tenant chacune sa propre échéance sur un portail à impulsion
   envoient deux impulsions pour une ouverture.
 
-## Le contact du portail repart dans l'autre sens
+## La liste des portails repart dans l'autre sens
 
-Un plugin ne peut pas lire le device d'une autre intégration : c'est donc la recette qui lit l'état
-du portail et le pousse au plugin, par un ordre. **Le visiteur, lui, ne le voit jamais** — un bouton
+Un plugin ne peut pas lire les équipements d'une autre intégration : c'est donc la recette qui lui
+pousse, par l'ordre `gate_catalog`, la liste des portails avec leur nom et leur contact — au
+démarrage, puis à chaque création, renommage, suppression ou mouvement d'un portail, jamais deux
+fois la même. **Le visiteur, lui, ne le voit jamais** — un bouton
 qui dit « Fermer le portail » est un afficheur d'état déguisé en verbe, et la page d'ouverture est
 interrogeable par qui détient un code. C'est le propriétaire qui le voit, sur la page « Accès
 invités » de Sowel.
@@ -48,16 +52,19 @@ L'état est lu **par catégorie** (`gate_state`, sinon `contact_door`), ce qui �
 
 | Champ | Défaut | Note |
 | --- | --- | --- |
-| Zone | — | La zone du portail |
-| Demandes des invités | — | L'équipement lié au device du plugin `guest-access` |
+| Zone | — | Où ranger la tuile |
+| Demandes d'ouverture | — | L'équipement lié au device « Accès invités » du plugin `guest-access` |
 | Alias du compteur | `requests` | La donnée qui compte les demandes |
-| Portail | — | Type `gate` obligatoire |
-| Alias de la commande | `command` | L'ordre du portail |
+| Alias de la commande | `command` | L'ordre envoyé au portail visé |
 | Valeur de la commande | `pulse` | Une impulsion |
 
-La validation refuse une configuration muette : sans les ordres `result` et `gate_state` sur
-l'équipement des demandes, la recette pourrait ouvrir le portail sans jamais rien dire au visiteur —
-elle le signale à la création plutôt qu'à l'usage.
+Plus de champ « Portail » : les portails se choisissent dans le plugin. La commande est la même pour
+tous les portails de la maison.
+
+La validation refuse une configuration muette : sans les ordres `result` et `gate_catalog`, ni les
+données `requests` et `last_request_gate` sur l'équipement des demandes, la recette ne pourrait ni
+répondre au visiteur ni proposer de portail — elle le signale à la création plutôt qu'à l'usage.
+Un équipement créé avant la v1.4 du plugin n'a pas ces liaisons : recréez-le depuis le device.
 
 ## Deux garde-fous
 
@@ -71,7 +78,8 @@ elle le signale à la création plutôt qu'à l'usage.
 Source personnelle (spec 136) : **Plugins → Store → Sources personnelles** →
 `adn-dev-adrien/sowel-recipe-guest-gate` → Installer → confirmer l'empreinte.
 
-Elle se lie à l'équipement du plugin `guest-access` (device « Accès invités ») et au portail.
+Une seule instance, liée à l'équipement du plugin `guest-access` (device « Accès invités »). Les
+portails se choisissent ensuite dans Accès partagés → « + portail ».
 
 ## Licence
 
