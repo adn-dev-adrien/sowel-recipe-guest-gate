@@ -17,6 +17,7 @@ function makeCtx(over: Record<string, unknown> = {}) {
   );
   const orders: Array<{ equipmentId: string; alias: string; value: unknown }> = [];
   const handlers: Handler[] = [];
+  const handlerTypes: string[] = [];
   const unsubs: number[] = [];
 
   const sourceDetails = {
@@ -26,6 +27,9 @@ function makeCtx(over: Record<string, unknown> = {}) {
     orderBindings: [
       { alias: "result", enumValues: ["opened", "already_open", "refused", "error"] },
       { alias: "gate_state", enumValues: ["open", "closed", "unknown"] },
+      // An equipment bound before the plugin declared this order does not have
+      // it — `labelBound: false` is that installation.
+      ...(over.labelBound === false ? [] : [{ alias: "opening_label" }]),
     ],
   };
   const gateDetails = {
@@ -45,8 +49,9 @@ function makeCtx(over: Record<string, unknown> = {}) {
       set: (key: string, value: unknown) => { state.set(key, value); },
     },
     eventBus: {
-      onType: (_type: "equipment.data.changed", handler: Handler) => {
+      onType: (type: string, handler: Handler) => {
         handlers.push(handler);
+        handlerTypes.push(type);
         const index = handlers.length - 1;
         return () => unsubs.push(index);
       },
@@ -74,7 +79,8 @@ function makeCtx(over: Record<string, unknown> = {}) {
     },
   };
 
-  return { ctx, logs, orders, state, handlers, unsubs, gateDetails, sourceDetails };
+  const handlerFor = (type: string): Handler => handlers[handlerTypes.indexOf(type)];
+  return { ctx, logs, orders, state, handlers, handlerFor, unsubs, gateDetails, sourceDetails };
 }
 
 const PARAMS = { zone: "z1", requestSource: SOURCE, gate: GATE };
@@ -271,7 +277,7 @@ describe("when the access is cut", () => {
     expect(orders.some((o) => o.alias === "result" && o.value === "refused")).toBe(true);
     // A cut access must not fail silently: the guest's phone says so.
     expect(logs.some((l) => l.level === "warn" && /coupé/.test(l.message))).toBe(true);
-    expect(state.get("summary")).toBe("Accès invités coupé");
+    expect(state.get("summary")).toBe("Accès partagés coupés");
     instance.stop();
   });
 
@@ -326,13 +332,16 @@ describe("when the gate refuses the command", () => {
   });
 });
 
-describe("the gate state pushed back to GuestFlow", () => {
-  it("is sent at start, so the first guest gets the right button", async () => {
+describe("the gate state pushed to the plugin", () => {
+  it("is sent at start, so the owner's page is right from the first look", async () => {
     const { ctx, orders } = makeCtx({ gateState: "closed" });
     const instance = createRecipe().createInstance(PARAMS, ctx as never);
     await settle();
 
-    expect(orders).toEqual([{ equipmentId: SOURCE, alias: "gate_state", value: "closed" }]);
+    // The name of what opens leaves at start too; this is about the contact.
+    expect(orders.filter((o) => o.alias === "gate_state")).toEqual([
+      { equipmentId: SOURCE, alias: "gate_state", value: "closed" },
+    ]);
     instance.stop();
   });
 
@@ -368,13 +377,50 @@ describe("the gate state pushed back to GuestFlow", () => {
   });
 });
 
+describe("the name of what opens", () => {
+  it("hands the plugin the gate's own name, as soon as it starts", async () => {
+    const { ctx, orders } = makeCtx();
+    createRecipe().createInstance(PARAMS, ctx as never);
+    await settle();
+    expect(orders).toContainEqual({ equipmentId: SOURCE, alias: "opening_label", value: "Portail" });
+  });
+
+  it("says it again when the equipment is renamed, and only then", async () => {
+    const { ctx, orders, handlerFor, gateDetails } = makeCtx();
+    createRecipe().createInstance(PARAMS, ctx as never);
+    await settle();
+    const sent = () => orders.filter((o) => o.alias === "opening_label").map((o) => o.value);
+
+    // An unrelated edit, or an edit to the same name, is not news.
+    handlerFor("equipment.updated")({ equipment: { id: GATE, name: "Portail" } });
+    await settle();
+    expect(sent()).toEqual(["Portail"]);
+
+    gateDetails.name = "Porte du garage";
+    handlerFor("equipment.updated")({ equipment: { id: GATE, name: "Porte du garage" } });
+    await settle();
+    expect(sent()).toEqual(["Portail", "Porte du garage"]);
+  });
+
+  it("stays quiet on an equipment bound before the plugin declared the order", async () => {
+    // Not an error: the visitor's page keeps its neutral title. Warning on
+    // every start about it would teach the owner to ignore the log.
+    const { ctx, orders, logs } = makeCtx({ labelBound: false });
+    createRecipe().createInstance(PARAMS, ctx as never);
+    await settle();
+    expect(orders.some((o) => o.alias === "opening_label")).toBe(false);
+    expect(logs.some((l) => l.level === "warn")).toBe(false);
+  });
+});
+
 describe("stop", () => {
-  it("unsubscribes both watches and stops acting", async () => {
+  it("unsubscribes all three watches and stops acting", async () => {
     const { ctx, orders, handlers, unsubs } = makeCtx({ initialCount: 4 });
     const instance = createRecipe().createInstance(PARAMS, ctx as never);
     instance.stop();
 
-    expect(unsubs).toHaveLength(2);
+    // The counter, the gate's contact, and the gate's name.
+    expect(unsubs).toHaveLength(3);
     handlers[0]({ equipmentId: SOURCE, alias: "requests", value: 5 });
     await settle();
     expect(orders.some((o) => o.equipmentId === GATE)).toBe(false);

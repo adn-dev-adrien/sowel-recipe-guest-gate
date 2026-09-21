@@ -1,9 +1,12 @@
-# Sowel Recipe — Accès invités au portail
+# Sowel Recipe — Accès partagés : ouverture
 
-Ouvre le portail quand un client du gîte ou de la lodge le demande depuis son téléphone. Les
-demandes arrivent par le plugin
-[`sowel-plugin-guest-access`](https://github.com/adn-dev-adrien/sowel-plugin-guest-access), qui tient
-les accès, les codes et la page des clients ; cette recette est ce qui décide et actionne.
+Ouvre le portail, la porte ou le garage quand une personne à qui vous avez donné un accès le
+demande depuis son téléphone — un invité, un enfant, un artisan. Les demandes arrivent par le
+plugin [Accès partagés](https://github.com/adn-dev-adrien/sowel-plugin-guest-access), qui tient
+les accès, les codes et la page d'ouverture ; cette recette est ce qui décide et actionne.
+
+Elle transmet aussi au plugin **le nom de l'équipement qu'elle pilote** : c'est lui qui titre la
+page d'ouverture sur le téléphone du visiteur, et il suit un renommage sans qu'on y pense.
 
 ## Pourquoi une recette, et pas le plugin lui-même
 
@@ -14,7 +17,7 @@ du côté client ne peut pas se transformer toute seule en commande de portail.
 
 Et elle vous laisse un interrupteur : la tuile du Dashboard arme ou coupe l'accès invités en un clic,
 sans ouvrir la page des accès et sans attendre quoi que ce soit. Un accès coupé n'échoue pas en
-silence — le téléphone du client affiche que la commande a été refusée depuis la maison.
+silence — le téléphone du visiteur affiche que la commande a été refusée depuis la maison.
 
 ## Ce qu'elle ne fait pas, volontairement
 
@@ -33,8 +36,8 @@ silence — le téléphone du client affiche que la commande a été refusée de
 ## Le contact du portail repart dans l'autre sens
 
 Un plugin ne peut pas lire le device d'une autre intégration : c'est donc la recette qui lit l'état
-du portail et le pousse au plugin, par un ordre. **Le client, lui, ne le voit jamais** — un bouton
-qui dit « Fermer le portail » est un afficheur d'état déguisé en verbe, et la page des clients est
+du portail et le pousse au plugin, par un ordre. **Le visiteur, lui, ne le voit jamais** — un bouton
+qui dit « Fermer le portail » est un afficheur d'état déguisé en verbe, et la page d'ouverture est
 interrogeable par qui détient un code. C'est le propriétaire qui le voit, sur la page « Accès
 invités » de Sowel.
 
@@ -53,7 +56,7 @@ L'état est lu **par catégorie** (`gate_state`, sinon `contact_door`), ce qui �
 | Valeur de la commande | `pulse` | Une impulsion |
 
 La validation refuse une configuration muette : sans les ordres `result` et `gate_state` sur
-l'équipement des demandes, la recette pourrait ouvrir le portail sans jamais rien dire au client —
+l'équipement des demandes, la recette pourrait ouvrir le portail sans jamais rien dire au visiteur —
 elle le signale à la création plutôt qu'à l'usage.
 
 ## Deux garde-fous

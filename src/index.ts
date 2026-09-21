@@ -105,6 +105,11 @@ interface RecipeContext {
       type: "equipment.data.changed",
       handler: (event: { equipmentId: string; alias: string; value: unknown }) => void,
     ): () => void;
+    /** Fired on any edit of an equipment — its name among them. */
+    onType(
+      type: "equipment.updated",
+      handler: (event: { equipment?: { id: string; name?: string } }) => void,
+    ): () => void;
   };
   equipmentManager: {
     getById(id: string): { id: string; name?: string; type?: string } | undefined;
@@ -141,6 +146,8 @@ interface RecipeDefinition {
 // ------------------------------------------------------------
 const RESULT_ALIAS = "result";
 const GATE_STATE_ALIAS = "gate_state";
+/** What opens, by its equipment name — the title of the visitor's page. */
+const OPENING_LABEL_ALIAS = "opening_label";
 
 const ACCESS_OPTIONS = [
   { value: "on", label: "Armed" },
@@ -181,24 +188,24 @@ export function isNewRequest(previous: number | null, incoming: unknown): boolea
 }
 
 const FR = {
-  name: "Accès invités au portail",
+  name: "Accès partagés — ouverture",
   description:
-    "Ouvre le portail quand un client du gîte ou de la lodge le demande depuis son téléphone — armable depuis le Dashboard, et toujours elle qui décide.",
+    "Ouvre quand une personne à qui vous avez donné un accès le demande depuis son téléphone — un invité, un enfant, un artisan. Armable depuis le Dashboard, et toujours elle qui décide.",
   slots: {
-    zone: { name: "Zone", description: "La zone où vit le portail" },
+    zone: { name: "Zone", description: "La zone où se trouve ce qui s'ouvre" },
     requestSource: {
-      name: "Demandes des invités",
+      name: "Demandes d'ouverture",
       description:
-        "L'équipement lié au device « Accès invités » du plugin guest-access. C'est lui qui compte les demandes des clients.",
+        "L'équipement lié au device « Accès invités » du plugin Accès partagés. C'est lui qui compte les demandes.",
     },
     requestAlias: {
       name: "Alias du compteur",
       description: "L'alias de la donnée qui compte les demandes. « requests » sauf si vous l'avez renommé.",
     },
-    gate: { name: "Portail", description: "Le portail à ouvrir" },
+    gate: { name: "Ce qui s'ouvre", description: "Le portail, la porte ou le garage à ouvrir" },
     commandAlias: {
       name: "Alias de la commande",
-      description: "L'ordre à envoyer au portail. « command » sur une installation LoRa/Somfy standard.",
+      description: "L'ordre à envoyer. « command » sur une installation LoRa/Somfy standard.",
     },
     commandValue: {
       name: "Valeur de la commande",
@@ -207,7 +214,7 @@ const FR = {
   },
   actions: {
     set_guest_access: {
-      name: "Accès invités",
+      name: "Accès partagés",
       options: { on: "Armé", off: "Arrêt" },
     },
   },
@@ -215,12 +222,12 @@ const FR = {
 
 function buildSlots(): RecipeSlotDef[] {
   return [
-    { id: "zone", name: "Zone", description: "The zone the gate lives in", type: "zone", required: true },
+    { id: "zone", name: "Zone", description: "The zone the thing that opens lives in", type: "zone", required: true },
     {
       id: "requestSource",
-      name: "Guest requests",
+      name: "Opening requests",
       description:
-        "The equipment bound to the guest-access plugin's device — the one counting the guests' requests.",
+        "The equipment bound to the Shared access plugin's device (« Accès invités ») — the one counting the requests.",
       type: "equipment",
       required: true,
       // No type constraint on purpose: the device carries a counter and two enum
@@ -237,8 +244,8 @@ function buildSlots(): RecipeSlotDef[] {
     },
     {
       id: "gate",
-      name: "Gate",
-      description: "The gate to open",
+      name: "What opens",
+      description: "The gate, door or garage to open",
       type: "equipment",
       required: true,
       constraints: { equipmentType: "gate", crossZone: true },
@@ -270,9 +277,9 @@ function textParam(params: Record<string, unknown>, id: string, fallback: string
 export function createRecipe(): RecipeDefinition {
   return {
     id: "guest-gate",
-    name: "Guest Gate Access",
+    name: "Shared Access — Opening",
     description:
-      "Opens the gate when a guest of the gîte or the lodge asks for it from their phone — armable from the Dashboard, and always the one that decides.",
+      "Opens when someone you gave access to asks for it from their phone — a guest, a child, a tradesperson. Armable from the Dashboard, and always the one that decides.",
     slots: buildSlots(),
 
     actions: [
@@ -359,10 +366,10 @@ export function createRecipe(): RecipeDefinition {
       const restored = ctx.state.get("guestAccess");
       let access: "on" | "off" = restored === "off" ? "off" : "on";
 
-      const gateName = (): string => ctx.equipmentManager.getById(gateId)?.name ?? "portail";
+      const gateName = (): string => ctx.equipmentManager.getById(gateId)?.name ?? "l'ouverture";
 
       const summaryLine = (): string => {
-        if (access === "off") return "Accès invités coupé";
+        if (access === "off") return "Accès partagés coupés";
         if (!openedCount) return "Armé — aucune demande";
         const plural = openedCount > 1 ? "s" : "";
         return `Armé — ${openedCount} ouverture${plural}${lastOpenedAt ? ` · dernière à ${lastOpenedAt}` : ""}`;
@@ -395,6 +402,33 @@ export function createRecipe(): RecipeDefinition {
         }
       };
 
+      /**
+       * Tells the plugin what the equipment is called, so the visitor's page is
+       * titled « Porte du garage » rather than a word chosen for somebody else's
+       * house. Only this recipe knows which equipment it drives, and the plugin
+       * is meant not to: it is handed the name, nothing more.
+       *
+       * Skipped without a word when the plugin's equipment has no such order —
+       * one bound before the order existed. The page then keeps its neutral
+       * title, which is a lesser page, not a broken one.
+       */
+      let lastOpeningLabel: string | null = null;
+      const pushOpeningLabel = async (): Promise<void> => {
+        const name = ctx.equipmentManager.getById(gateId)?.name?.trim();
+        if (!name || name === lastOpeningLabel) return;
+        const source = ctx.equipmentManager.getByIdWithDetails(sourceId);
+        const bound = (source?.orderBindings ?? []).some((b) => b.alias === OPENING_LABEL_ALIAS);
+        if (!bound) return;
+        lastOpeningLabel = name;
+        try {
+          await ctx.dispatchOrder(sourceId, OPENING_LABEL_ALIAS, name);
+        } catch (err: unknown) {
+          lastOpeningLabel = null;
+          const msg = err instanceof Error ? err.message : String(err);
+          ctx.log(`nom de l'ouverture non transmis au plugin — ${msg}`, "warn");
+        }
+      };
+
       const report = async (outcome: "opened" | "refused" | "error", detail?: string): Promise<void> => {
         try {
           await ctx.dispatchOrder(sourceId, RESULT_ALIAS, outcome);
@@ -410,7 +444,7 @@ export function createRecipe(): RecipeDefinition {
         if (stopped) return;
 
         if (access === "off") {
-          ctx.log(`demande d'un client refusée : l'accès invités est coupé`, "warn");
+          ctx.log(`demande refusée : les accès partagés sont coupés`, "warn");
           await report("refused", undefined);
           publish();
           return;
@@ -427,7 +461,7 @@ export function createRecipe(): RecipeDefinition {
         }
 
         if (failure) {
-          ctx.log(`${gateName()} : commande d'un client en échec — ${failure}`, "error");
+          ctx.log(`${gateName()} : commande d'un accès partagé en échec — ${failure}`, "error");
           await report("error");
           publish();
           return;
@@ -435,7 +469,7 @@ export function createRecipe(): RecipeDefinition {
 
         openedCount += 1;
         lastOpenedAt = hhmm();
-        ctx.log(`${gateName()} : commande envoyée pour un client`);
+        ctx.log(`${gateName()} : commande envoyée pour un accès partagé`);
         await report("opened");
         publish();
       };
@@ -461,6 +495,12 @@ export function createRecipe(): RecipeDefinition {
         void pushGateState(readGateState(ctx.equipmentManager.getByIdWithDetails(gateId)));
       });
 
+      // A rename lands on the visitor's page without anyone thinking of it.
+      const unsubRename = ctx.eventBus.onType("equipment.updated", (event) => {
+        if (event.equipment?.id !== gateId) return;
+        void pushOpeningLabel();
+      });
+
       // Starting points: the counter as it stands (so nothing fires on a restart),
       // and the contact as it stands (so the owner's page is right from the
       // first look, not only after the gate next moves).
@@ -470,11 +510,12 @@ export function createRecipe(): RecipeDefinition {
         lastCount = initial.value;
       }
       void pushGateState(readGateState(ctx.equipmentManager.getByIdWithDetails(gateId)));
+      void pushOpeningLabel();
 
       publish();
       ctx.log(
-        `Recette démarrée : ${gateName()} ouvert sur demande des clients — accès invités ` +
-          `${access === "on" ? "armé" : "coupé"}, commande « ${commandAlias}=${commandValue} »`,
+        `Recette démarrée : ${gateName()} ouvert sur demande — accès partagés ` +
+          `${access === "on" ? "armés" : "coupés"}, commande « ${commandAlias}=${commandValue} »`,
       );
 
       return {
@@ -482,6 +523,7 @@ export function createRecipe(): RecipeDefinition {
           stopped = true;
           unsubRequests();
           unsubGate();
+          unsubRename();
         },
 
         onAction(action: string, payload?: Record<string, unknown>): void {
@@ -489,7 +531,7 @@ export function createRecipe(): RecipeDefinition {
           const asked = typeof payload?.value === "string" ? payload.value : null;
           access = asked === "on" || asked === "off" ? asked : access === "on" ? "off" : "on";
           publish();
-          ctx.log(`accès invités ${access === "on" ? "armé" : "coupé"}`);
+          ctx.log(`accès partagés ${access === "on" ? "armés" : "coupés"}`);
         },
       };
     },
